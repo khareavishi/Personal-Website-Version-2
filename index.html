@@ -187,8 +187,8 @@
 
       <form id="cmsLoginForm" class="space-y-4">
         <div>
-          <label for="cmsLoginUsername" class="block font-mono text-xs uppercase mb-1">Username</label>
-          <input id="cmsLoginUsername" type="text" required class="w-full bg-white dark:bg-neutral-800 border border-stone-300 dark:border-stone-700 p-2.5 text-xs font-mono focus:outline-none focus:border-terracotta" placeholder="admin or avishi">
+          <label for="cmsLoginEmail" class="block font-mono text-xs uppercase mb-1">Curator Email</label>
+          <input id="cmsLoginEmail" type="email" required class="w-full bg-white dark:bg-neutral-800 border border-stone-300 dark:border-stone-700 p-2.5 text-xs font-mono focus:outline-none focus:border-terracotta" placeholder="avishi@projectpolaris.in">
         </div>
 
         <div>
@@ -199,13 +199,10 @@
         <div id="cmsLoginError" class="text-xs text-red-600 dark:text-red-400 font-mono hidden"></div>
 
         <div class="pt-2 flex flex-col gap-2">
-          <button id="cmsLoginSubmitBtn" type="submit" class="w-full py-2.5 bg-terracotta hover:bg-terracotta-dark text-white font-mono text-xs uppercase tracking-widest transition-colors">
+          <button id="cmsLoginSubmitBtn" type="submit" class="w-full py-2.5 bg-terracotta hover:bg-terracotta-dark text-white font-mono text-xs uppercase tracking-widest transition-colors cursor-pointer">
             Authorize Session
           </button>
-          <button id="cmsDemoFillBtn" type="button" class="w-full py-2 border border-stone-300 dark:border-stone-700 text-stone-600 dark:text-stone-300 hover:bg-stone-200 dark:hover:bg-neutral-800 font-mono text-[11px] uppercase tracking-wider transition-colors">
-            Fill Default Credentials (admin / polaris2026)
-          </button>
-          <button id="cmsCancelLoginBtn" type="button" class="w-full py-1.5 text-stone-500 hover:text-stone-700 dark:hover:text-stone-300 font-mono text-[11px] uppercase tracking-wider transition-colors">
+          <button id="cmsCancelLoginBtn" type="button" class="w-full py-1.5 text-stone-500 hover:text-stone-700 dark:hover:text-stone-300 font-mono text-[11px] uppercase tracking-wider transition-colors cursor-pointer">
             Return to Public Website
           </button>
         </div>
@@ -1490,18 +1487,13 @@
 
       syncFromSupabase();
 
-      try {
-        const auth = localStorage.getItem(AUTH_KEY);
-        if (auth) {
-          const session = JSON.parse(auth);
-          if (session && session.expiresAt > Date.now()) {
+      if (supabaseClient) {
+        supabaseClient.auth.getSession().then(({ data: { session } }) => {
+          if (session) {
             currentUserSession = session;
-          } else {
-            localStorage.removeItem(AUTH_KEY);
+            updateAdminBar();
           }
-        }
-      } catch (err) {
-        console.warn('Auth read error:', err);
+        }).catch(e => console.warn('Supabase getSession notice:', e));
       }
     }
 
@@ -2278,41 +2270,61 @@
       document.getElementById('cmsLoginOverlay').classList.add('hidden');
     });
 
-    document.getElementById('cmsDemoFillBtn').addEventListener('click', () => {
-      document.getElementById('cmsLoginUsername').value = 'admin';
-      document.getElementById('cmsLoginPassword').value = 'polaris2026';
-    });
-
     document.getElementById('cmsLoginForm').addEventListener('submit', async (e) => {
       e.preventDefault();
-      const u = document.getElementById('cmsLoginUsername').value.trim();
-      const p = document.getElementById('cmsLoginPassword').value.trim();
+      const email = document.getElementById('cmsLoginEmail').value.trim();
+      const password = document.getElementById('cmsLoginPassword').value.trim();
       const errEl = document.getElementById('cmsLoginError');
+      const submitBtn = document.getElementById('cmsLoginSubmitBtn');
 
-      const expectedHash = localStorage.getItem(PASS_HASH_KEY) || DEFAULT_PASS_HASH;
-      const inputHash = await hashPassword(p);
+      errEl.classList.add('hidden');
+      errEl.textContent = '';
 
-      if ((u === 'admin' || u === 'avishi') && (inputHash === expectedHash || p === 'polaris2026')) {
-        const session = {
-          user: u,
-          token: 'tok_' + Math.random().toString(36).substring(2),
-          createdAt: Date.now(),
-          expiresAt: Date.now() + (24 * 60 * 60 * 1000)
-        };
-        currentUserSession = session;
-        localStorage.setItem(AUTH_KEY, JSON.stringify(session));
+      if (!supabaseClient) {
+        errEl.textContent = 'Backend connection not available. Please verify your Supabase configuration.';
+        errEl.classList.remove('hidden');
+        return;
+      }
+
+      submitBtn.disabled = true;
+      submitBtn.textContent = 'Verifying with Supabase...';
+
+      try {
+        const { data, error } = await supabaseClient.auth.signInWithPassword({
+          email: email,
+          password: password
+        });
+
+        if (error) {
+          errEl.textContent = error.message;
+          errEl.classList.remove('hidden');
+          submitBtn.disabled = false;
+          submitBtn.textContent = 'Authorize Session';
+          return;
+        }
+
+        currentUserSession = data.session;
         document.getElementById('cmsLoginOverlay').classList.add('hidden');
-        errEl.classList.add('hidden');
-        showToast('Authorized session initiated');
+        showToast('Authorized session initiated via Supabase Auth');
         showCmsStudio();
         updateAdminBar();
-      } else {
-        errEl.textContent = 'Invalid curator credentials. Default password is polaris2026.';
+      } catch (err) {
+        errEl.textContent = 'Authentication error: ' + err.message;
         errEl.classList.remove('hidden');
+      } finally {
+        submitBtn.disabled = false;
+        submitBtn.textContent = 'Authorize Session';
       }
     });
 
-    function logoutCurator() {
+    async function logoutCurator() {
+      if (supabaseClient) {
+        try {
+          await supabaseClient.auth.signOut();
+        } catch (e) {
+          console.warn('Supabase signout notice:', e);
+        }
+      }
       currentUserSession = null;
       localStorage.removeItem(AUTH_KEY);
       updateAdminBar();
@@ -2872,22 +2884,34 @@
 
     document.getElementById('cmsChangePasswordForm').addEventListener('submit', async (e) => {
       e.preventDefault();
-      const curr = document.getElementById('cmsCurrentPassword').value.trim();
       const next = document.getElementById('cmsNewPassword').value.trim();
       const msg = document.getElementById('cmsPassMsg');
 
-      const expectedHash = localStorage.getItem(PASS_HASH_KEY) || DEFAULT_PASS_HASH;
-      const currHash = await hashPassword(curr);
+      if (!next || next.length < 6) {
+        msg.textContent = 'New password must be at least 6 characters.';
+        msg.className = 'font-mono text-xs text-red-600 block';
+        return;
+      }
 
-      if (currHash === expectedHash || curr === 'polaris2026') {
-        const newHash = await hashPassword(next);
-        localStorage.setItem(PASS_HASH_KEY, newHash);
-        msg.textContent = 'Curator password successfully updated.';
-        msg.className = 'font-mono text-xs text-emerald-600 block';
-        document.getElementById('cmsChangePasswordForm').reset();
-        showToast('Password updated');
-      } else {
-        msg.textContent = 'Current password incorrect.';
+      if (!supabaseClient) {
+        msg.textContent = 'Supabase client is not connected.';
+        msg.className = 'font-mono text-xs text-red-600 block';
+        return;
+      }
+
+      try {
+        const { data, error } = await supabaseClient.auth.updateUser({ password: next });
+        if (error) {
+          msg.textContent = 'Supabase update failed: ' + error.message;
+          msg.className = 'font-mono text-xs text-red-600 block';
+        } else {
+          msg.textContent = 'Curator password successfully updated in Supabase cloud.';
+          msg.className = 'font-mono text-xs text-emerald-600 block';
+          document.getElementById('cmsChangePasswordForm').reset();
+          showToast('Password updated in Supabase Cloud');
+        }
+      } catch (err) {
+        msg.textContent = 'Error: ' + err.message;
         msg.className = 'font-mono text-xs text-red-600 block';
       }
     });
